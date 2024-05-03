@@ -1,0 +1,917 @@
+Description: This stack includes resources needed to deploy AWS CDK apps into
+  this environment
+Parameters:
+  TrustedAccounts:
+    Description: List of AWS accounts that are trusted to publish assets and deploy
+      stacks to this environment
+    Default: ''
+    Type: CommaDelimitedList
+  TrustedAccountsRoles:
+    Description: List of IAM roles (PrincipalArn patterns) in the trusted accounts
+      that are trusted to publish assets and deploy stacks to this environment
+    Default: ''
+    Type: CommaDelimitedList
+  TrustedAccountsForLookup:
+    Description: List of AWS accounts that are trusted to look up values in this environment
+    Default: ''
+    Type: CommaDelimitedList
+  FileAssetsBucketName:
+    Description: The name of the S3 bucket used for file assets
+    Default: ''
+    Type: String
+  FileAssetsBucketKmsKeyId:
+    Description: Empty to create a new key (default), 'AWS_MANAGED_KEY' to use a
+      managed S3 key, or the ID/ARN of an existing key.
+    Default: ''
+    Type: String
+  ContainerAssetsRepositoryName:
+    Description: A user-provided custom name to use for the container assets ECR repository
+    Default: ''
+    Type: String
+  Qualifier:
+    Description: An identifier to distinguish multiple bootstrap stacks in the same
+      environment
+    Default: hnb659fds
+    Type: String
+    AllowedPattern: '[A-Za-z0-9_-]{1,10}'
+    ConstraintDescription: Qualifier must be an alphanumeric identifier of at most 10 characters
+  BootstrapVariant:
+    Type: String
+    Default: 'AWS CDK: Custom Bootstrap with CDK guardrails'
+    Description: Describe the provenance of the resources in this bootstrap stack.
+      Change this when you customize the template. To prevent accidents, the CDK
+      CLI will not overwrite bootstrap stacks with a different variant.
+Conditions:
+  HasTrustedAccounts: !Not
+    - !Equals
+      - ''
+      - !Join
+        - ''
+        - !Ref TrustedAccounts
+  HasTrustedAccountsRoles: !Not
+    - !Equals
+      - ''
+      - !Join
+        - ''
+        - !Ref TrustedAccountsRoles
+  HasTrustedAccountsForLookup: !Not
+    - !Equals
+      - ''
+      - !Join
+        - ''
+        - !Ref TrustedAccountsForLookup
+  HasCustomFileAssetsBucketName: !Not
+    - !Equals
+      - ''
+      - !Ref FileAssetsBucketName
+  CreateNewKey: !Equals
+    - ''
+    - !Ref FileAssetsBucketKmsKeyId
+  UseAwsManagedKey: !Equals
+    - AWS_MANAGED_KEY
+    - !Ref FileAssetsBucketKmsKeyId
+  HasCustomContainerAssetsRepositoryName: !Not
+    - !Equals
+      - ''
+      - !Ref ContainerAssetsRepositoryName
+Resources:
+  FileAssetsBucketEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Statement:
+          - Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:GenerateDataKey
+              - kms:TagResource
+              - kms:UntagResource
+            Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+            Resource: '*'
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService:
+                  - !Sub s3.${AWS::Region}.amazonaws.com
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Principal:
+              AWS: !Sub ${FilePublishingRole.Arn}
+            Resource: '*'
+    Condition: CreateNewKey
+  FileAssetsBucketEncryptionKeyAlias:
+    Condition: CreateNewKey
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/cdk-${Qualifier}-assets-key
+      TargetKeyId: !Ref FileAssetsBucketEncryptionKey
+  StagingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - HasCustomFileAssetsBucketName
+        - !Sub ${FileAssetsBucketName}
+        - !Sub cdk-${Qualifier}-assets-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !If
+                - CreateNewKey
+                - !Sub ${FileAssetsBucketEncryptionKey.Arn}
+                - !If
+                  - UseAwsManagedKey
+                  - !Ref AWS::NoValue
+                  - !Sub ${FileAssetsBucketKmsKeyId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 365
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Delete
+  StagingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StagingBucket
+      PolicyDocument:
+        Id: AccessControl
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Action: s3:*
+            Effect: Deny
+            Resource:
+              - !Sub ${StagingBucket.Arn}
+              - !Sub ${StagingBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+            Principal: '*'
+  ContainerAssetsRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Untagged images should not exist, but expire any older than one year",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 365
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryName: !If
+        - HasCustomContainerAssetsRepositoryName
+        - !Sub ${ContainerAssetsRepositoryName}
+        - !Sub cdk-${Qualifier}-container-assets-${AWS::AccountId}-${AWS::Region}
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaECRImageRetrievalPolicy
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringLike:
+                aws:sourceArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+  FilePublishingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+          - !If
+            - HasTrustedAccounts
+            - Action: sts:AssumeRole
+              Effect: Allow
+              Principal:
+                AWS: !Ref TrustedAccounts
+              Condition:
+                ArnLike:
+                  iam:PrincipalArn: !If [ HasTrustedAccountsRoles, !Ref TrustedAccountsRoles, "*" ]
+            - !Ref AWS::NoValue
+      RoleName: !Sub cdk-${Qualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: aws-cdk:bootstrap-role
+          Value: file-publishing
+  ImagePublishingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+          - !If
+            - HasTrustedAccounts
+            - Action: sts:AssumeRole
+              Effect: Allow
+              Principal:
+                AWS: !Ref TrustedAccounts
+              Condition:
+                ArnLike:
+                  iam:PrincipalArn: !If [ HasTrustedAccountsRoles, !Ref TrustedAccountsRoles, "*" ]
+            - !Ref AWS::NoValue
+      RoleName: !Sub cdk-${Qualifier}-image-publishing-role-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: aws-cdk:bootstrap-role
+          Value: image-publishing
+  LookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+          - !If
+            - HasTrustedAccountsForLookup
+            - Action: sts:AssumeRole
+              Effect: Allow
+              Principal:
+                AWS: !Ref TrustedAccountsForLookup
+            - !Ref AWS::NoValue
+          - !If
+            - HasTrustedAccounts
+            - Action: sts:AssumeRole
+              Effect: Allow
+              Principal:
+                AWS: !Ref TrustedAccounts
+              Condition:
+                ArnLike:
+                  iam:PrincipalArn: !If [ HasTrustedAccountsRoles, !Ref TrustedAccountsRoles, "*" ]
+            - !Ref AWS::NoValue
+      RoleName: !Sub cdk-${Qualifier}-lookup-role-${AWS::AccountId}-${AWS::Region}
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Sid: DontReadSecrets
+                Effect: Deny
+                Action:
+                  - kms:Decrypt
+                Resource: '*'
+            Version: '2012-10-17'
+          PolicyName: LookupRolePolicy
+      Tags:
+        - Key: aws-cdk:bootstrap-role
+          Value: lookup
+  FilePublishingRoleDefaultPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:GetEncryptionConfiguration
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject*
+              - s3:Abort*
+            Resource:
+              - !Sub ${StagingBucket.Arn}
+              - !Sub ${StagingBucket.Arn}/*
+            Effect: Allow
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource: !If
+              - CreateNewKey
+              - !Sub ${FileAssetsBucketEncryptionKey.Arn}
+              - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${FileAssetsBucketKmsKeyId}
+        Version: '2012-10-17'
+      Roles:
+        - !Ref FilePublishingRole
+      PolicyName: !Sub cdk-${Qualifier}-file-publishing-role-default-policy-${AWS::AccountId}-${AWS::Region}
+  ImagePublishingRoleDefaultPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - ecr:PutImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:BatchCheckLayerAvailability
+              - ecr:DescribeRepositories
+              - ecr:DescribeImages
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource: !Sub ${ContainerAssetsRepository.Arn}
+            Effect: Allow
+          - Action:
+              - ecr:GetAuthorizationToken
+            Resource: '*'
+            Effect: Allow
+        Version: '2012-10-17'
+      Roles:
+        - !Ref ImagePublishingRole
+      PolicyName: !Sub cdk-${Qualifier}-image-publishing-role-default-policy-${AWS::AccountId}-${AWS::Region}
+  DeploymentActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+          - !If
+            - HasTrustedAccounts
+            - Action: sts:AssumeRole
+              Effect: Allow
+              Principal:
+                AWS: !Ref TrustedAccounts
+              Condition:
+                ArnLike:
+                  iam:PrincipalArn: !If [ HasTrustedAccountsRoles, !Ref TrustedAccountsRoles, "*" ]
+            - !Ref AWS::NoValue
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Sid: CloudFormationPermissions
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                Resource: '*'
+              - Sid: PipelineCrossAccountArtifactsBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:GetBucket*
+                  - s3:List*
+                  - s3:Abort*
+                  - s3:DeleteObject*
+                  - s3:PutObject*
+                Resource: '*'
+                Condition:
+                  StringNotEquals:
+                    s3:ResourceAccount: !Ref AWS::AccountId
+              - Sid: PipelineCrossAccountArtifactsKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+              - Action: iam:PassRole
+                Resource: !Sub ${CloudFormationExecutionRole.Arn}
+                Effect: Allow
+              - Sid: CliPermissions
+                Action:
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                  - cloudformation:DeleteStack
+                  - cloudformation:UpdateTerminationProtection
+                  - sts:GetCallerIdentity
+                  - cloudformation:GetTemplateSummary
+                Resource: '*'
+                Effect: Allow
+              - Sid: CliStagingBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:GetBucket*
+                  - s3:List*
+                Resource:
+                  - !Sub ${StagingBucket.Arn}
+                  - !Sub ${StagingBucket.Arn}/*
+              - Sid: ReadVersion
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${CdkBootstrapVersion}
+            Version: '2012-10-17'
+          PolicyName: default
+      RoleName: !Sub cdk-${Qualifier}-deploy-role-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: aws-cdk:bootstrap-role
+          Value: deploy
+  CloudFormationExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowIndividualActions
+            Effect: Allow
+            Action:
+              - ec2:Get*
+              - ec2:Describe*
+              - ec2:AssociateIamInstanceProfile
+              - ec2:DisassociateIamInstanceProfile
+              - ec2:ModifyDefaultCreditSpecification
+              - ec2:ModifyInstanceAttribute
+              - ec2:ModifyInstanceCreditSpecification
+              - ec2:ModifyInstanceEventStartTime
+              - ec2:ModifyInstanceMaintenanceOptions
+              - ec2:ModifyInstanceMetadataDefaults
+              - ec2:ModifyInstanceMetadataOptions
+              - ec2:ModifyPrivateDnsNameOptions
+              - ec2:MonitorInstances
+              - ec2:RebootInstances
+              - ec2:ReplaceIamInstanceProfileAssociation
+              - ec2:ReportInstanceStatus
+              - ec2:ResetInstanceAttribute
+              - ec2:RunInstances
+              - ec2:SendDiagnosticInterrupt
+              - ec2:StartInstances
+              - ec2:StopInstances
+              - ec2:TerminateInstances
+              - ec2:UnmonitorInstances
+              - ec2:CreateLaunchTemplate
+              - ec2:CreateLaunchTemplateVersion
+              - ec2:DeleteLaunchTemplate
+              - ec2:DeleteLaunchTemplateVersions
+              - ec2:ModifyLaunchTemplate
+              - ec2:ModifyAvailabilityZoneGroup
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:CreateSecurityGroup
+              - ec2:DeleteSecurityGroup
+              - ec2:ModifySecurityGroupRules
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:UpdateSecurityGroupRuleDescriptionsEgress
+              - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+              - ec2:CancelSpotInstanceRequests
+              - ec2:CreateSpotDatafeedSubscription
+              - ec2:DeleteSpotDatafeedSubscription
+              - ec2:RequestSpotInstances
+              - ec2:CreateTags
+              - ec2:DeleteTags
+              - ec2:CopySnapshot
+              - ec2:CreateSnapshot
+              - ec2:CreateSnapshots
+              - ec2:DeleteSnapshot
+              - ec2:DisableSnapshotBlockPublicAccess
+              - ec2:EnableSnapshotBlockPublicAccess
+              - ec2:GetSnapshotBlockPublicAccessState
+              - ec2:LockSnapshot
+              - ec2:ModifySnapshotAttribute
+              - ec2:ModifySnapshotTier
+              - ec2:ResetSnapshotAttribute
+              - ec2:RestoreSnapshotTier
+              - ec2:UnlockSnapshot
+              - ec2:AttachVolume
+              - ec2:CreateReplaceRootVolumeTask
+              - ec2:CreateVolume
+              - ec2:DeleteVolume
+              - ec2:DetachVolume
+              - ec2:EnableVolumeIO
+              - ec2:ModifyVolume
+              - ec2:ModifyVolumeAttribute
+              - kms:CreateKey
+              - kms:Describe*
+              - kms:Get*
+              - kms:List*
+              - kms:CancelKeyDeletion
+              - kms:CreateAlias
+              - kms:DeleteAlias
+              - kms:DisableKey
+              - kms:EnableKey
+              - kms:EnableKeyRotation
+              - kms:DisableKeyRotation
+              - kms:PutKeyPolicy
+              - kms:RotateKeyOnDemand
+              - kms:ScheduleKeyDeletion
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:UpdateAlias
+              - kms:UpdateKeyDescription
+              - kms:UpdatePrimaryRegion
+              - ssm:Describe*
+              - ssm:Get*
+              - ssm:List*
+              - ssm:PutParameter
+              - ssm:StartSession
+            Resource: '*'
+          - Sid: AllowSSMUserSessionsManagement
+            Effect: Allow
+            Action:
+              - ssm:TerminateSession
+              - ssm:ResumeSession
+            Resource: "arn:aws:ssm:*:*:session/${aws:userid}-*"
+          - Sid: AllowServices
+            Effect: Allow
+            Action:
+              - appconfig:*
+              - batch:*
+              - bedrock:*
+              - cassandra:*
+              - cloudwatch:*
+              - codebuild:*
+              - codedeploy:*
+              - codepipeline:*
+              - cognito:*
+              - dynamodb:*
+              - ecr:*
+              - ecs:*
+              - efs:*
+              - events:*
+              - firehose:*
+              - kinesis:*
+              - lambda:*
+              - s3:*
+              - sagemaker:*
+              - secretsmanager:*
+              - sns:*
+              - sqs:*
+              - states:*
+            Resource: '*'
+          - Sid: AllowIAMOrgAccountActions
+            Effect: Allow
+            Action:
+              - account:ListRegions
+              - iam:CreateServiceLinkedRole
+              - iam:DeleteServiceLinkedRole
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+              - iam:GetRole
+              - iam:ListAttachedRolePolicies
+              - iam:ListPolicies
+              - iam:ListPolicyVersions
+              - iam:ListRolePolicies
+              - iam:ListRoles
+              - organizations:DescribeOrganization
+              - sts:GetCallerIdentity
+            Resource: '*'
+          - Sid: AllowIAMPoliciesOnlyInPath
+            Effect: Allow
+            Action:
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:SetDefaultPolicyVersion
+            Resource: arn:aws:iam::*:policy/apppolicies/*
+          - Sid: AllowIAMRolesOnlyInPath
+            Effect: Allow
+            Action:
+              - iam:AttachRolePolicy
+              - iam:CreateRole
+              - iam:DeleteRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PassRole
+              - iam:PutRolePermissionsBoundary
+              - iam:PutRolePolicy
+            Resource: arn:aws:iam::*:role/approles/*
+          - Effect: Allow
+            Action:
+              - iam:AddRoleToInstanceProfile
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+            Resource:
+              - arn:aws:iam::*:instance-profile/appinstanceprofiles/*
+              - arn:aws:iam::*:role/approles/*
+          - Sid: EnforceActionsHaveBoundary
+            Effect: Deny
+            Action:
+              - iam:AttachRolePolicy
+              - iam:CreateRole
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:PutRolePermissionsBoundary
+            Resource: '*'
+            Condition:
+              StringNotLike:
+                iam:PermissionsBoundary: !Ref CdkBoostrapPermissionsBoundaryPolicy
+          - Sid: DenyChangesToBoundaryPolicy
+            Effect: Deny
+            Action:
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:CreatePolicy
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+            Resource: !Ref CdkBoostrapPermissionsBoundaryPolicy
+      ManagedPolicyName: !Sub cdk-${Qualifier}-deploy-policy-${AWS::AccountId}-${AWS::Region}
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+        - !Ref CloudFormationExecutionPolicy
+      RoleName: !Sub cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
+  CdkBoostrapPermissionsBoundaryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: StorageServicesWithAPIDataPlane
+            Effect: Allow
+            Action:
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:ConditionCheckItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeStream
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:ListGlobalTables
+              - dynamodb:ListStreams
+              - dynamodb:ListTables
+              - dynamodb:ListTagsOfResource
+              - dynamodb:PartiQLDelete
+              - dynamodb:PartiQLInsert
+              - dynamodb:PartiQLSelect
+              - dynamodb:PartiQLUpdate
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+              - es:ESHttp*
+              - s3:AbortMultipartUpload
+              - s3:CreateJob
+              - s3:DeleteJobTagging
+              - s3:DeleteObject
+              - s3:DeleteObjectTagging
+              - s3:DeleteObjectVersion
+              - s3:DeleteObjectVersionTagging
+              - s3:DeleteStorageLensConfigurationTagging
+              - s3:DescribeJob
+              - s3:GetBucketLocation
+              - s3:GetEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:GetObject
+              - s3:GetObjectAcl
+              - s3:GetObjectTagging
+              - s3:GetObjectTorrent
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionAcl
+              - s3:GetObjectVersionForReplication
+              - s3:GetObjectVersionTagging
+              - s3:GetObjectVersionTorrent
+              - s3:ListAccessPoints
+              - s3:ListAccessPointsForObjectLambda
+              - s3:ListAllMyBuckets
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:ListBucketVersions
+              - s3:ListJobs
+              - s3:ListMultipartUploadParts
+              - s3:ListMultiRegionAccessPoints
+              - s3:ListStorageLensConfigurations
+              - s3:PutBucketTagging
+              - s3:PutJobTagging
+              - s3:PutLifecycleConfiguration
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+              - s3:PutStorageLensConfigurationTagging
+              - s3:ReplicateObject
+              - s3:ReplicateTags
+              - s3:RestoreObject
+              - s3:UpdateJobPriority
+              - s3:UpdateJobStatus
+            Resource: '*'
+          - Sid: TraditionalAppBuildingBlocks
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:ListSubscriptionsByTopic
+              - sns:ListTopics
+              - sns:Publish
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+              - sqs:ChangeMessageVisibility*
+              - sqs:DeleteMessage*
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueues
+              - sqs:PurgeQueue
+              - sqs:ReceiveMessage
+              - sqs:SendMessage*
+            Resource: '*'
+          - Sid: AIAppBuildingBlocks
+            Effect: Allow
+            Action:
+              - bedrock:*
+              - comprehend:*
+              - forecast:*
+              - frauddetector:*
+              - geo:*
+              - kendra:*
+              - lex:*
+              - personalize:*
+              - polly:*
+              - rekognition:*
+              - sagemaker:*
+              - textract:*
+              - transcribe:*
+              - translate:*
+            Resource: '*'
+          - Sid: ComputeCallOuts
+            Effect: Allow
+            Action:
+              - batch:CancelJob
+              - batch:DescribeJobQueues
+              - batch:DescribeJobs
+              - batch:ListJobs
+              - batch:SubmitJob
+              - batch:TerminateJob
+              - ecs:RunTask
+              - execute-api:*
+              - firehose:*
+              - kinesis:*
+              - lambda:InvokeAsync
+              - lambda:InvokeFunction
+              - states:DescribeActivity
+              - states:DescribeExecution
+              - states:GetActivityTask
+              - states:ListActivities
+              - states:ListExecutions
+              - states:ListStateMachines
+              - states:SendTaskFailure
+              - states:SendTaskHeartbeat
+              - states:SendTaskSuccess
+              - states:StartExecution
+              - states:StartSyncExecution
+              - states:StopExecution
+            Resource: '*'
+          - Sid: EncryptionAndSecrets
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyPair
+              - kms:GenerateDataKeyPairWithoutPlaintext
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:GenerateRandom
+              - kms:ListAliases
+              - kms:ListKeys
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+              - kms:Sign
+              - kms:Verify
+              - secretsmanager:CancelRotateSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetRandomPassword
+              - secretsmanager:GetSecretValue
+              - secretsmanager:ListSecrets
+              - secretsmanager:ListSecretVersionIds
+              - secretsmanager:PutSecretValue
+              - secretsmanager:RestoreSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:UpdateSecretVersionStage
+              - ssm:DescribeParameters
+              - ssm:GetParameter*
+              - ssm:PutParameter
+            Resource: '*'
+          - Sid: AppDeploymentAndManagement
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudwatch:PutMetricData
+              - cloudwatch:PutMetricStream
+              - codedeploy-commands-secure:GetDeploymentSpecification
+              - codedeploy-commands-secure:PollHostCommand
+              - codedeploy-commands-secure:PutHostCommandAcknowledgement
+              - codedeploy-commands-secure:PutHostCommandComplete
+              - codepipeline:ListPipelineExecutions
+              - codepipeline:PutJobFailureResult
+              - codepipeline:PutJobSuccessResult
+              - ec2:Describe*
+              - ecr:BatchGetImage
+              - ecr:DescribeImages
+              - ecr:GetAuthorizationToken
+              - ecr:GetDownloadUrlForLayer
+              - ecr:ListImages
+              - events:ListEventBuses
+              - events:PutEvents
+              - events:PutPartnerEvents
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:Describe*
+              - logs:FilterLogEvents
+              - logs:ListLogDeliveries
+              - logs:ListTagsLogGroup
+              - logs:PutLogEvents
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Resource: '*'
+          - Sid: IAMauthorizationForDataPlanes
+            Effect: Allow
+            Action:
+              - efs:Client*
+            Resource: '*'
+      ManagedPolicyName: !Sub cdk-${Qualifier}-permissions-boundary-${AWS::AccountId}-${AWS::Region}
+      Path: /
+  CdkBootstrapVersion:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub /cdk-bootstrap/${Qualifier}/version
+      Value: '20'
+Outputs:
+  BucketName:
+    Description: The name of the S3 bucket owned by the CDK toolkit stack
+    Value: !Sub ${StagingBucket}
+  BucketDomainName:
+    Description: The domain name of the S3 bucket owned by the CDK toolkit stack
+    Value: !Sub ${StagingBucket.RegionalDomainName}
+  FileAssetKeyArn:
+    Description: The ARN of the KMS key used to encrypt the asset bucket (deprecated)
+    Value: !If
+      - CreateNewKey
+      - !Sub ${FileAssetsBucketEncryptionKey.Arn}
+      - !Sub ${FileAssetsBucketKmsKeyId}
+    Export:
+      Name: !Sub CdkBootstrap-${Qualifier}-FileAssetKeyArn
+  ImageRepositoryName:
+    Description: The name of the ECR repository which hosts docker image assets
+    Value: !Sub ${ContainerAssetsRepository}
+  BootstrapVersion:
+    Description: The version of the bootstrap resources that are currently mastered
+      in this stack
+    Value: !GetAtt CdkBootstrapVersion.Value
