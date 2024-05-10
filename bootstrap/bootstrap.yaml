@@ -615,6 +615,7 @@ Resources:
               - iam:CreatePolicy
               - iam:CreatePolicyVersion
               - iam:DeletePolicy
+              - iam:DeletePolicyVersion
               - iam:SetDefaultPolicyVersion
             Resource: arn:aws:iam::*:policy/apppolicies/*
           - Sid: AllowIAMRolesOnlyInPath
@@ -622,11 +623,13 @@ Resources:
             Action:
               - iam:AttachRolePolicy
               - iam:CreateRole
+              - iam:DeleteRole
               - iam:DeleteRolePolicy
               - iam:DetachRolePolicy
               - iam:PassRole
               - iam:PutRolePermissionsBoundary
               - iam:PutRolePolicy
+              - iam:UpdateAssumeRolePolicy
             Resource: arn:aws:iam::*:role/approles/*
           - Effect: Allow
             Action:
@@ -648,7 +651,7 @@ Resources:
               - iam:PutRolePermissionsBoundary
             Resource: '*'
             Condition:
-              StringNotLike:
+              ArnNotEquals:
                 iam:PermissionsBoundary: !Ref CdkBoostrapPermissionsBoundaryPolicy
           - Sid: DenyChangesToBoundaryPolicy
             Effect: Deny
