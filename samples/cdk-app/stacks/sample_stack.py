@@ -1,8 +1,10 @@
 from aws_cdk import (
     Duration,
+    RemovalPolicy,
     Stack,
     aws_iam as iam,
     aws_lambda as _lambda,
+    aws_s3 as s3,
 )
 from constructs import Construct
 
@@ -42,4 +44,11 @@ class SampleStack(Stack):
             assumed_by=iam.AccountPrincipal(self.account),
             role_name="SampleRole",
             managed_policies=[policy],
+        )
+
+        bucket = s3.Bucket(
+            self,
+            "SampleBucket",
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
         )

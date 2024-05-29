@@ -652,7 +652,10 @@ Resources:
             Resource: '*'
             Condition:
               ArnNotEquals:
-                iam:PermissionsBoundary: !Ref CdkBoostrapPermissionsBoundaryPolicy
+                iam:PermissionsBoundary:
+                  - !Ref AppPermissionsBoundaryPolicy
+                  - !Ref CustomResourcePermissionsBoundaryPolicy
+                  - !Ref InitPermissionsBoundaryPolicy
           - Sid: DenyChangesToBoundaryPolicy
             Effect: Deny
             Action:
@@ -661,7 +664,10 @@ Resources:
               - iam:CreatePolicy
               - iam:DeletePolicyVersion
               - iam:SetDefaultPolicyVersion
-            Resource: !Ref CdkBoostrapPermissionsBoundaryPolicy
+            Resource: 
+              - !Ref AppPermissionsBoundaryPolicy
+              - !Ref CustomResourcePermissionsBoundaryPolicy
+              - !Ref InitPermissionsBoundaryPolicy
       ManagedPolicyName: !Sub cdk-${Qualifier}-deploy-policy-${AWS::AccountId}-${AWS::Region}
   CloudFormationExecutionRole:
     Type: AWS::IAM::Role
@@ -676,7 +682,7 @@ Resources:
       ManagedPolicyArns:
         - !Ref CloudFormationExecutionPolicy
       RoleName: !Sub cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
-  CdkBoostrapPermissionsBoundaryPolicy:
+  AppPermissionsBoundaryPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       PolicyDocument:
@@ -888,7 +894,41 @@ Resources:
             Action:
               - efs:Client*
             Resource: '*'
-      ManagedPolicyName: !Sub cdk-${Qualifier}-permissions-boundary-${AWS::AccountId}-${AWS::Region}
+      ManagedPolicyName: !Sub cdk-${Qualifier}-app-permissions-boundary-${AWS::AccountId}-${AWS::Region}
+      Path: /
+  CustomResourcePermissionsBoundaryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaExecutionPermissions
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:PutBucketPolicy
+            Resource: '*'
+      ManagedPolicyName: !Sub cdk-${Qualifier}-customresource-permissions-boundary-${AWS::AccountId}-${AWS::Region}
+      Path: /
+  InitPermissionsBoundaryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaExecutionPermissions
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+      ManagedPolicyName: !Sub cdk-${Qualifier}-init-permissions-boundary-${AWS::AccountId}-${AWS::Region}
       Path: /
   CdkBootstrapVersion:
     Type: AWS::SSM::Parameter

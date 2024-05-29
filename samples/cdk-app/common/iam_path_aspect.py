@@ -1,5 +1,7 @@
+import re
 import jsii
 from aws_cdk import (
+    CfnResource,
     IAspect,
     aws_iam as iam,
 )
@@ -24,3 +26,9 @@ class IamPathFixer:
 
             if node.path in ["/", None]:
                 node.add_property_override("Path", "/appinstanceprofiles/")
+
+        elif (
+            isinstance(node, CfnResource) and node.cfn_resource_type == "AWS::IAM::Role"
+        ):
+            if re.match(r".+/Custom::.+CustomResourceProvider/Role$", node.node.path):
+                node.add_property_override("Path", "/approles/")
