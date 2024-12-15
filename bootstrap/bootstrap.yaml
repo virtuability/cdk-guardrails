@@ -527,8 +527,10 @@ Resources:
               - ec2:RestoreSnapshotTier
               - ec2:UnlockSnapshot
               - ec2:AttachVolume
+              - ec2:CreateNetworkInterface
               - ec2:CreateReplaceRootVolumeTask
               - ec2:CreateVolume
+              - ec2:DeleteNetworkInterface
               - ec2:DeleteVolume
               - ec2:DetachVolume
               - ec2:EnableVolumeIO
@@ -540,12 +542,14 @@ Resources:
               - kms:List*
               - kms:CancelKeyDeletion
               - kms:CreateAlias
+              - kms:CreateGrant
               - kms:DeleteAlias
               - kms:DisableKey
               - kms:EnableKey
               - kms:EnableKeyRotation
               - kms:DisableKeyRotation
               - kms:PutKeyPolicy
+              - kms:RetireGrant
               - kms:RotateKeyOnDemand
               - kms:ScheduleKeyDeletion
               - kms:TagResource
@@ -576,11 +580,12 @@ Resources:
               - codebuild:*
               - codedeploy:*
               - codepipeline:*
-              - cognito:*
+              - cognito-identity:*
+              - cognito-idp:*
               - dynamodb:*
               - ecr:*
               - ecs:*
-              - efs:*
+              - elasticfilesystem:*
               - events:*
               - firehose:*
               - kinesis:*
@@ -601,6 +606,7 @@ Resources:
               - iam:GetPolicy
               - iam:GetPolicyVersion
               - iam:GetRole
+              - iam:GetRolePolicy
               - iam:ListAttachedRolePolicies
               - iam:ListPolicies
               - iam:ListPolicyVersions
@@ -629,7 +635,9 @@ Resources:
               - iam:PassRole
               - iam:PutRolePermissionsBoundary
               - iam:PutRolePolicy
+              - iam:TagRole
               - iam:UpdateAssumeRolePolicy
+              - iam:UntagRole
             Resource: arn:aws:iam::*:role/approles/*
           - Effect: Allow
             Action:
@@ -637,6 +645,8 @@ Resources:
               - iam:CreateInstanceProfile
               - iam:DeleteInstanceProfile
               - iam:RemoveRoleFromInstanceProfile
+              - iam:TagInstanceProfile
+              - iam:UntagInstanceProfile
             Resource:
               - arn:aws:iam::*:instance-profile/appinstanceprofiles/*
               - arn:aws:iam::*:role/approles/*
@@ -664,6 +674,8 @@ Resources:
               - iam:CreatePolicy
               - iam:DeletePolicyVersion
               - iam:SetDefaultPolicyVersion
+              - iam:TagPolicy
+              - iam:UntagPolicy
             Resource: 
               - !Ref AppPermissionsBoundaryPolicy
               - !Ref CustomResourcePermissionsBoundaryPolicy
@@ -723,6 +735,7 @@ Resources:
               - s3:DeleteStorageLensConfigurationTagging
               - s3:DescribeJob
               - s3:GetBucketLocation
+              - s3:GetBucketNotification
               - s3:GetEncryptionConfiguration
               - s3:GetLifecycleConfiguration
               - s3:GetObject
@@ -744,6 +757,7 @@ Resources:
               - s3:ListMultipartUploadParts
               - s3:ListMultiRegionAccessPoints
               - s3:ListStorageLensConfigurations
+              - s3:PutBucketNotification
               - s3:PutBucketTagging
               - s3:PutJobTagging
               - s3:PutLifecycleConfiguration
@@ -849,9 +863,12 @@ Resources:
               - secretsmanager:RotateSecret
               - secretsmanager:UpdateSecret
               - secretsmanager:UpdateSecretVersionStage
+              - ssm:AddTagsToResource
+              - ssm:DeleteParameter*
               - ssm:DescribeParameters
               - ssm:GetParameter*
               - ssm:PutParameter
+              - ssm:RemoveTagsFromResource
             Resource: '*'
           - Sid: AppDeploymentAndManagement
             Effect: Allow
@@ -866,7 +883,11 @@ Resources:
               - codepipeline:ListPipelineExecutions
               - codepipeline:PutJobFailureResult
               - codepipeline:PutJobSuccessResult
+              - ec2:AssignPrivateIpAddresses
+              - ec2:CreateNetworkInterface
+              - ec2:DeleteNetworkInterface
               - ec2:Describe*
+              - ec2:UnassignPrivateIpAddresses
               - ecr:BatchGetImage
               - ecr:DescribeImages
               - ecr:GetAuthorizationToken
@@ -892,7 +913,7 @@ Resources:
           - Sid: IAMauthorizationForDataPlanes
             Effect: Allow
             Action:
-              - efs:Client*
+              - elasticfilesystem:Client*
             Resource: '*'
       ManagedPolicyName: !Sub cdk-${Qualifier}-app-permissions-boundary-${AWS::AccountId}-${AWS::Region}
       Path: /

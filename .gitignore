@@ -11,3 +11,6 @@ cdk.out
 
 # Apple
 .DS_Store
+
+# Backup
+*.bkp
